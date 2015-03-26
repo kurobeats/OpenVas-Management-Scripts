@@ -1,0 +1,26 @@
+#!/bin/bash
+test -e /var/lib/openvas/CA/cacert.pem  || openvas-mkcert -q
+openvas-nvt-sync
+openvas-scapdata-sync
+openvas-certdata-sync
+if ! test -e /var/lib/openvas/CA/clientcert.pem || \
+    ! test -e /var/lib/openvas/private/CA/clientkey.pem; then
+    openvas-mkcert-client -n -i
+fi
+killall openvasmd
+systemctl stop openvas-scanner.service 
+killall gsad
+
+openvassd
+openvasmd --migrate
+openvasmd --rebuild
+killall openvassd
+
+sleep 15
+systemctl start openvas-scanner.service
+openvasmd
+gsad -p 9392
+
+if ! openvasmd --list-users | grep -q ^admin$ ; then
+    openvasmd --create-user=admin
+fi

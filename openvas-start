@@ -1,0 +1,6 @@
+#!/bin/bash
+echo "Starting OpenVas Services"
+gsad -p 9392
+systemctl start openvas-scanner.service
+openvasmd
+
