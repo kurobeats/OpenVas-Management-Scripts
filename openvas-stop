@@ -3,4 +3,5 @@ echo "Stopping OpenVas Services"
 killall gsad
 systemctl stop openvas-scanner.service
 killall openvasmd
+killall redis-server
 
