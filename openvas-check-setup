@@ -10,7 +10,7 @@
 # Michael Wiegand <michael.wiegand@greenbone.net>
 #
 # Copyright:
-# Copyright (C) 2011-2014 Greenbone Networks GmbH
+# Copyright (C) 2011-2015 Greenbone Networks GmbH
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2,
@@ -27,7 +27,7 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
 
 LOG=/tmp/openvas-check-setup.log
-CHECKVERSION=2.2.5
+CHECKVERSION=2.3.1
 
 if [ "$1" = "--server" -o "$2" = "--server" ]
 then
@@ -36,20 +36,33 @@ else
   MODE="desktop"
 fi
 
-# Current default is OpenVAS-7:
-VER="7"
-SCANNER_MAJOR="4"
+# Current default is OpenVAS-8:
+VER="8"
+SCANNER_MAJOR="5"
 SCANNER_MINOR="0"
-MANAGER_MAJOR="5"
+MANAGER_MAJOR="6"
 MANAGER_MINOR="0"
 ADMINISTRATOR_MAJOR="0"
 ADMINISTRATOR_MINOR="0"
-GSA_MAJOR="5"
+GSA_MAJOR="6"
 GSA_MINOR="0"
 CLI_MAJOR="1"
-CLI_MINOR="3"
+CLI_MINOR="4"
 
-if [ "$1" = "--v8" -o "$2" = "--v8" ]
+if [ "$1" = "--v9" -o "$2" = "--v9" ]
+then
+  VER="9"
+  SCANNER_MAJOR="5"
+  SCANNER_MINOR="1"
+  MANAGER_MAJOR="6"
+  MANAGER_MINOR="1"
+  ADMINISTRATOR_MAJOR="0"
+  ADMINISTRATOR_MINOR="0"
+  GSA_MAJOR="6"
+  GSA_MINOR="1"
+  CLI_MAJOR="1"
+  CLI_MINOR="4"
+elif [ "$1" = "--v8" -o "$2" = "--v8" ]
 then
   VER="8"
   SCANNER_MAJOR="5"
@@ -59,6 +72,19 @@ then
   ADMINISTRATOR_MAJOR="0"
   ADMINISTRATOR_MINOR="0"
   GSA_MAJOR="6"
+  GSA_MINOR="0"
+  CLI_MAJOR="1"
+  CLI_MINOR="4"
+elif [ "$1" = "--v7" -o "$2" = "--v7" ]
+then
+  VER="7"
+  SCANNER_MAJOR="4"
+  SCANNER_MINOR="0"
+  MANAGER_MAJOR="5"
+  MANAGER_MINOR="0"
+  ADMINISTRATOR_MAJOR="0"
+  ADMINISTRATOR_MINOR="0"
+  GSA_MAJOR="5"
   GSA_MINOR="0"
   CLI_MAJOR="1"
   CLI_MINOR="3"
@@ -77,43 +103,13 @@ then
   CLI_MINOR="2"
   GSD_MAJOR="1"
   GSD_MINOR="2"
-elif [ "$1" = "--v5" -o "$2" = "--v5" ]
-then
-  VER="5"
-  SCANNER_MAJOR="3"
-  SCANNER_MINOR="3"
-  MANAGER_MAJOR="3"
-  MANAGER_MINOR="0"
-  ADMINISTRATOR_MAJOR="1"
-  ADMINISTRATOR_MINOR="2"
-  GSA_MAJOR="3"
-  GSA_MINOR="0"
-  CLI_MAJOR="1"
-  CLI_MINOR="1"
-  GSD_MAJOR="1"
-  GSD_MINOR="2"
-elif [ "$1" = "--v4" -o "$2" = "--v4" ]
-then
-  VER="4"
-  SCANNER_MAJOR="3"
-  SCANNER_MINOR="2"
-  MANAGER_MAJOR="2"
-  MANAGER_MINOR="0"
-  ADMINISTRATOR_MAJOR="1"
-  ADMINISTRATOR_MINOR="1"
-  GSA_MAJOR="2"
-  GSA_MINOR="0"
-  CLI_MAJOR="1"
-  CLI_MINOR="1"
-  GSD_MAJOR="1"
-  GSD_MINOR="2"
 fi
 
 echo "openvas-check-setup $CHECKVERSION"
 echo "  Test completeness and readiness of OpenVAS-$VER"
-if [ "$VER" = "7" ]
+if [ "$VER" = "8" ]
 then
-  echo "  (add '--v4', '--v5', '--v6' or '--v8'"
+  echo "  (add '--v6' or '--v7' or '--v9'"
   echo "   if you want to check for another OpenVAS version)"
 fi
 echo ""
@@ -210,6 +206,54 @@ fi
 echo "" >> $LOG
 
 log_and_print "OK: OpenVAS Scanner CA Certificate is present as $CAFILE."
+
+if [ "$VER" -ge 8 ]
+then
+  echo "Checking presence of redis ..." >> $LOG
+  BINARY=`redis-server --version`
+
+  if [ $? -ne 0 ]
+  then
+    log_and_print "ERROR: No redis-server installation found."
+    log_and_print "FIX: You should install redis-server for improved scalability and ability to trace/debug the KB"
+    check_failed
+  else
+    VERSION=`redis-server --version | awk '{ print $4 }'`
+    if [ `echo $VERSION | grep sha` ]
+    then
+      VERSION=`redis-server --version | awk '{ print $3 }'`
+    fi
+    log_and_print "OK: redis-server is present in version $VERSION."
+    HAVE_REDIS=1
+  fi
+  echo "" >> $LOG
+
+  if [ $HAVE_REDIS -eq 1 ]
+  then
+    echo "Checking if redis-server is configured properly to run with openVAS ..." >> $LOG
+    REDISSOCKET=`openvassd -s 2>>$LOG | grep kb_location | sed -e "s/^kb_location = //"`
+    if [ -z "$REDISSOCKET" ]
+    then
+       log_and_print "ERROR: scanner is not configured to use a redis-server socket."
+       log_and_print "FIX: Configure the kb_location setting of the scanner to the path of the redis-server socket."
+       check_failed
+    else
+      log_and_print "OK: scanner (kb_location setting) is configured properly using the redis-server socket: $REDISSOCKET"
+      echo "Checking if redis-server is running ..." >> $LOG
+      if [ -e $REDISSOCKET ]
+      then
+       log_and_print "OK: redis-server is running and listening on socket: $REDISSOCKET."
+       else
+       log_and_print "ERROR: redis-server is not running or not listening on socket: $REDISSOCKET"
+       log_and_print "FIX: You should start the redis-server or configure it to listen on socket: $REDISSOCKET"
+       check_failed
+      fi
+    fi
+  log_and_print "OK: redis-server configuration is OK and redis-server is running."
+  fi
+
+  echo "" >> $LOG
+fi
 
 echo "Checking NVT collection ..." >> $LOG
 PLUGINSFOLDER=`openvassd -s 2>>$LOG | grep plugins_folder | sed -e "s/^plugins_folder = //"`
@@ -336,6 +380,29 @@ echo "" >> $LOG
 
 log_and_print "OK: Access rights for the OpenVAS Manager database are correct."
 
+if [ $ADMINISTRATOR_MAJOR = "0" ]
+then
+  echo "Checking if users exist ..." >> $LOG
+  if [ $VER != "7" ]
+  then
+    USERCOUNT=`openvasmd --get-users | sed -e "/^$/d" | wc -l`
+  else
+    USERCOUNT=`openvasmd --list-users | sed -e "/^$/d" | wc -l`
+  fi
+  if [ $USERCOUNT -eq 0 ]
+  then
+    log_and_print "ERROR: No users found. You need to create at least one user to log in."
+    log_and_print "       It is recommended to have at least one user with role Admin."
+    log_and_print "FIX: create a user by running 'openvasmd --create-user=<name> --role=Admin && openvasmd --user=<name> --new-password=<password>'"
+    check_failed
+  else
+    log_and_print "OK: At least one user exists."
+  fi
+  echo "" >> $LOG
+fi
+
+# TODO: Do a check for presence of at least one Admin user.
+
 echo "Checking sqlite3 presence ..." >> $LOG
 SQLITE3=`type sqlite3 2> /dev/null`
 if [ $? -ne 0 ]
@@ -399,20 +466,17 @@ then
   fi
 fi
 
-if [ "$VER" -ge 5 ]
+echo "Checking OpenVAS SCAP database ..." >> $LOG
+# Guess openvas state dir from $PLUGINSFOLDER
+STATEDIR=`dirname $PLUGINSFOLDER`
+SCAPDB="$STATEDIR/scap-data/scap.db"
+if [ ! -e $SCAPDB ]
 then
-  echo "Checking OpenVAS SCAP database ..." >> $LOG
-  # Guess openvas state dir from $PLUGINSFOLDER
-  STATEDIR=`dirname $PLUGINSFOLDER`
-  SCAPDB="$STATEDIR/scap-data/scap.db"
-  if [ ! -e $SCAPDB ]
-  then
-    log_and_print "ERROR: No OpenVAS SCAP database found. (Tried: $SCAPDB)"
-    log_and_print "FIX: Run a SCAP synchronization script like openvas-scapdata-sync or greenbone-scapdata-sync."
-    check_failed
-  fi
-  echo "" >> $LOG
+  log_and_print "ERROR: No OpenVAS SCAP database found. (Tried: $SCAPDB)"
+  log_and_print "FIX: Run a SCAP synchronization script like openvas-scapdata-sync or greenbone-scapdata-sync."
+  check_failed
 fi
+echo "" >> $LOG
 
 log_and_print "OK: OpenVAS SCAP database found in $SCAPDB."
 
@@ -598,18 +662,14 @@ then
 
     if [ `echo $VERSION | grep "^$GSD_MAJOR\.$GSD_MINOR" | wc -l` -ne "1" ]
     then
-      # a special exception rule for v4 where also another release is OK
-      if [ $VER -ne "4" -o `echo $VERSION | grep "^1\.1" | wc -l` -ne "1" ]
+      if [ $VER -lt "6" ]
       then
-        if [ $VER -lt "6" ]
-        then
-          log_and_print "ERROR: Greenbone Security Desktop too old or too new: $VERSION"
-          log_and_print "FIX: Please install Greenbone Security Desktop $GSD_MAJOR.$GSD_MINOR."
-          check_failed
-        else
-          log_and_print "WARNING: Greenbone Security Desktop too old or too new: $VERSION"
-          log_and_print "SUGGEST: Please install Greenbone Security Desktop $GSD_MAJOR.$GSD_MINOR."
-        fi
+        log_and_print "ERROR: Greenbone Security Desktop too old or too new: $VERSION"
+        log_and_print "FIX: Please install Greenbone Security Desktop $GSD_MAJOR.$GSD_MINOR."
+        check_failed
+      else
+        log_and_print "WARNING: Greenbone Security Desktop too old or too new: $VERSION"
+        log_and_print "SUGGEST: Please install Greenbone Security Desktop $GSD_MAJOR.$GSD_MINOR."
       fi
     fi
     echo "" >> $LOG
@@ -638,18 +698,18 @@ echo "" >> $LOG
 
 if [ $HAVE_NETSTAT -eq 1 ]
 then
-  netstat -A inet -ntlp 2> /dev/null >> $LOG
-  OPENVASSD_HOST=`netstat -A inet -ntlp 2> /dev/null | grep openvassd | awk -F\  '{print $4}' | awk -F: '{print $1}'`
-  OPENVASSD_PORT=`netstat -A inet -ntlp 2> /dev/null | grep openvassd | awk -F\  '{print $4}' | awk -F: '{print $2}'`
-  OPENVASMD_HOST=`netstat -A inet -ntlp 2> /dev/null | grep openvasmd | awk -F\  '{print $4}' | awk -F: '{print $1}'`
-  OPENVASMD_PORT=`netstat -A inet -ntlp 2> /dev/null | grep openvasmd | awk -F\  '{print $4}' | awk -F: '{print $2}'`
-  OPENVASAD_HOST=`netstat -A inet -ntlp 2> /dev/null | grep openvasad | awk -F\  '{print $4}' | awk -F: '{print $1}'`
-  OPENVASAD_PORT=`netstat -A inet -ntlp 2> /dev/null | grep openvasad | awk -F\  '{print $4}' | awk -F: '{print $2}'`
-  GSAD_HOST=`netstat -A inet -ntlp 2> /dev/null | grep gsad | awk -F\  '{print $4}' | awk -F: '{print $1}'`
-  GSAD_PORT=`netstat -A inet -ntlp 2> /dev/null | grep gsad | awk -F\  '{print $4}' | awk -F: '{print $2}'`
+  netstat -A inet -A inet6 -ntlp 2> /dev/null >> $LOG
+  OPENVASSD_HOST=`netstat -A inet -A inet6 -ntlp 2> /dev/null | grep openvassd | awk -F\  '{print $4}' | awk -F: 'sub(FS $NF,x)'`
+  OPENVASSD_PORT=`netstat -A inet -A inet6 -ntlp 2> /dev/null | grep openvassd | awk -F\  '{print $4}' | awk -F: '{print $NF}'`
+  OPENVASMD_HOST=`netstat -A inet -A inet6 -ntlp 2> /dev/null | grep openvasmd | awk -F\  '{print $4}' | awk -F: 'sub(FS $NF,x)'`
+  OPENVASMD_PORT=`netstat -A inet -A inet6 -ntlp 2> /dev/null | grep openvasmd | awk -F\  '{print $4}' | awk -F: '{print $NF}'`
+  OPENVASAD_HOST=`netstat -A inet -A inet6 -ntlp 2> /dev/null | grep openvasad | awk -F\  '{print $4}' | awk -F: 'sub(FS $NF,x)'`
+  OPENVASAD_PORT=`netstat -A inet -A inet6 -ntlp 2> /dev/null | grep openvasad | awk -F\  '{print $4}' | awk -F: '{print $NF}'`
+  GSAD_HOST=`netstat -A inet -A inet6 -ntlp 2> /dev/null | grep gsad | awk -F\  '{print $4}' | awk -F: 'sub(FS $NF,x)'`
+  GSAD_PORT=`netstat -A inet -A inet6 -ntlp 2> /dev/null | grep gsad | awk -F\  '{print $4}' | awk -F: '{print $NF}'`
 
   case "$OPENVASSD_HOST" in
-    "0.0.0.0") log_and_print "OK: OpenVAS Scanner is running and listening on all interfaces." ;;
+    "0.0.0.0"|"::") log_and_print "OK: OpenVAS Scanner is running and listening on all interfaces." ;;
     "127.0.0.1") log_and_print "OK: OpenVAS Scanner is running and listening only on the local interface." ;;
     "") OPENVASSD_PROC=`ps -Af | grep "openvassd: waiting for incoming connections" | grep -v grep | wc -l`
         if [ $OPENVASSD_PROC -eq 0 ]
@@ -673,7 +733,7 @@ then
   esac
 
   case "$OPENVASMD_HOST" in
-    "0.0.0.0") log_and_print "OK: OpenVAS Manager is running and listening on all interfaces." ;;
+    "0.0.0.0"|"::") log_and_print "OK: OpenVAS Manager is running and listening on all interfaces." ;;
     "127.0.0.1") log_and_print "WARNING: OpenVAS Manager is running and listening only on the local interface."
                  log_and_print "This means that you will not be able to access the OpenVAS Manager from the"
                  log_and_print "outside using GSD or OpenVAS CLI."
@@ -710,7 +770,7 @@ then
   fi
 
   case "$GSAD_HOST" in
-    "0.0.0.0") log_and_print "OK: Greenbone Security Assistant is running and listening on all interfaces." ;;
+    "0.0.0.0"|"::") log_and_print "OK: Greenbone Security Assistant is running and listening on all interfaces." ;;
     "127.0.0.1") log_and_print "WARNING: Greenbone Security Assistant is running and listening only on the local interface."
                  log_and_print "This means that you will not be able to access the Greenbone Security Assistant from the"
                  log_and_print "outside using a web browser."
@@ -733,7 +793,6 @@ if [ $OPENVASSD_PORT -eq -1 ] || [ $OPENVASMD_PORT -eq -1 ] || [ $OPENVASAD_PORT
 
 fi
 
-
 echo "Step 8: Checking nmap installation ..."
 
 echo "Checking presence of nmap ..." >> $LOG
@@ -747,15 +806,14 @@ else
   if [ `echo $VERSION | grep "5\.51" | wc -l` -ne "1" ]
   then
     log_and_print "WARNING: Your version of nmap is not fully supported: $VERSION"
-    log_and_print "SUGGEST: You should install nmap 5.51."
+    log_and_print "SUGGEST: You should install nmap 5.51 if you plan to use the nmap NSE NVTs."
   else
     log_and_print "OK: nmap is present in version $VERSION."
   fi
 fi
 echo "" >> $LOG
 
-
-echo "Step 9: Checking presence of optional tools ..."
+echo "Step 10: Checking presence of optional tools ..."
 
 echo "Checking presence of pdflatex ..." >> $LOG
 PDFLATEX=`type pdflatex 2> /dev/null`
@@ -920,3 +978,4 @@ echo "and help us to improve this check routine:"
 echo "http://lists.wald.intevation.org/mailman/listinfo/openvas-discuss"
 echo "Please attach the log-file ($LOG) to help us analyze the problem."
 echo ""
+

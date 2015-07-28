@@ -4,4 +4,3 @@ killall gsad
 systemctl stop openvas-scanner.service
 killall openvasmd
 killall redis-server
-
