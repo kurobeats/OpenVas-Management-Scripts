@@ -1,8 +1,8 @@
 #!/bin/bash
 echo "Updating OpenVas Feeds"
-greenbone-nvt-sync
-greenbone-scapdata-sync
-greenbone-certdata-sync
+openvas-nvt-sync
+openvas-scapdata-sync
+openvas-certdata-sync
 
 wget http://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xml -O /tmp/service-names-port-numbers.xml
 openvas-portnames-update /tmp/service-names-port-numbers.xml
