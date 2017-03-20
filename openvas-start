@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "Starting OpenVas Services"
-redis-server /etc/redis.conf
-gsad -p 9392
-systemctl start openvas-scanner.service
-openvasmd
+service greenbone-security-assistant start
+service openvas-scanner start
+service openvas-manager start
+
