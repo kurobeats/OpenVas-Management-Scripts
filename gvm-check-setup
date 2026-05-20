@@ -1,0 +1,299 @@
+#!/bin/bash
+# Greenbone Community Edition Setup Check Script
+# Compatible with Greenbone Community Edition 22.4+
+#
+# This script checks the completeness and readiness of the modern
+# Greenbone Community Edition (GCE) installation.
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+LOG=/tmp/gvm-check-setup.log
+CHECKVERSION=1.0.0
+
+# Initialize log file
+echo "gvm-check-setup $CHECKVERSION" > $LOG
+echo "  Date: $(date -R)" >> $LOG
+echo "" >> $LOG
+
+log_and_print() {
+    echo -e "       $1"
+    echo "       $1" >> $LOG
+}
+
+log_section() {
+    echo ""
+    echo -e "${BLUE}$1${NC}"
+    echo "$1" >> $LOG
+}
+
+log_ok() {
+    echo -e "  ${GREEN}[OK]${NC} $1"
+    echo "  [OK] $1" >> $LOG
+}
+
+log_warn() {
+    echo -e "  ${YELLOW}[WARN]${NC} $1"
+    echo "  [WARN] $1" >> $LOG
+}
+
+log_error() {
+    echo -e "  ${RED}[ERROR]${NC} $1"
+    echo "  [ERROR] $1" >> $LOG
+}
+
+check_failed() {
+    echo ""
+    echo -e "${RED}ERROR: Your Greenbone Community Edition installation is not yet complete!${NC}"
+    echo ""
+    echo "Please follow the instructions marked with FIX above and run this"
+    echo "script again."
+    echo ""
+    echo "Send us the log-file ($LOG) to help analyze the problem."
+    echo ""
+    exit 1
+}
+
+echo "======================================"
+echo "gvm-check-setup $CHECKVERSION"
+echo "Greenbone Community Edition Setup Check"
+echo "======================================"
+echo ""
+
+# ============================================================================
+# Step 1: Check for required binaries
+# ============================================================================
+log_section "Step 1: Checking required binaries..."
+
+check_binary() {
+    local binary=$1
+    local package=$2
+
+    if command -v "$binary" &> /dev/null; then
+        log_ok "$binary found"
+        return 0
+    else
+        log_error "$binary not found"
+        log_and_print "FIX: Install $package"
+        return 1
+    fi
+}
+
+REQUIRED_BINS=(
+    "openvas:openvas-scanner"
+    "ospd-openvas:ospd-openvas"
+    "gvmd:gvmd"
+    "gsad:gsad"
+    "greenbone-feed-sync:greenbone-feed-sync"
+    "redis-server:redis-server"
+    "pg_isready:postgresql"
+)
+
+MISSING_BINS=0
+for item in "${REQUIRED_BINS[@]}"; do
+    IFS=':' read -r binary package <<< "$item"
+    if ! check_binary "$binary" "$package"; then
+        MISSING_BINS=$((MISSING_BINS + 1))
+    fi
+done
+
+if [ $MISSING_BINS -gt 0 ]; then
+    check_failed
+fi
+
+# ============================================================================
+# Step 2: Check Redis configuration
+# ============================================================================
+log_section "Step 2: Checking Redis configuration..."
+
+REDIS_SOCKET="/run/redis-openvas/redis.sock"
+
+if [ -S "$REDIS_SOCKET" ]; then
+    log_ok "Redis socket exists at $REDIS_SOCKET"
+else
+    log_error "Redis socket not found at $REDIS_SOCKET"
+    log_and_print "FIX: Start Redis with: systemctl start redis-server@openvas.service"
+    check_failed
+fi
+
+# Check if Redis is responding
+if redis-cli -s "$REDIS_SOCKET" ping &>/dev/null; then
+    log_ok "Redis is responding on socket"
+else
+    log_error "Redis is not responding on socket"
+    log_and_print "FIX: Check Redis status with: systemctl status redis-server@openvas.service"
+    check_failed
+fi
+
+# ============================================================================
+# Step 3: Check PostgreSQL
+# ============================================================================
+log_section "Step 3: Checking PostgreSQL..."
+
+if pg_isready &>/dev/null; then
+    log_ok "PostgreSQL is running"
+else
+    log_error "PostgreSQL is not running"
+    log_and_print "FIX: Start PostgreSQL with: systemctl start postgresql"
+    check_failed
+fi
+
+# Check if gvmd database exists
+if sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw gvmd; then
+    log_ok "gvmd database exists"
+else
+    log_error "gvmd database not found"
+    log_and_print "FIX: Create database with: sudo -u postgres createdb -O gvm gvmd"
+    check_failed
+fi
+
+# ============================================================================
+# Step 4: Check directory permissions
+# ============================================================================
+log_section "Step 4: Checking directory permissions..."
+
+REQUIRED_DIRS=(
+    "/var/lib/gvm"
+    "/var/lib/openvas"
+    "/var/lib/notus"
+    "/var/log/gvm"
+    "/run/gvmd"
+    "/run/ospd"
+    "/etc/openvas"
+)
+
+for dir in "${REQUIRED_DIRS[@]}"; do
+    if [ -d "$dir" ]; then
+        log_ok "Directory $dir exists"
+    else
+        log_error "Directory $dir does not exist"
+        log_and_print "FIX: Create directory with: mkdir -p $dir"
+        check_failed
+    fi
+done
+
+# Check gvm user
+if id "gvm" &>/dev/null; then
+    log_ok "gvm user exists"
+else
+    log_error "gvm user does not exist"
+    log_and_print "FIX: Create user with: useradd -r -M -U -s /usr/sbin/nologin gvm"
+    check_failed
+fi
+
+# ============================================================================
+# Step 5: Check GPG setup for feed validation
+# ============================================================================
+log_section "Step 5: Checking GPG setup for feed validation..."
+
+GPG_DIR="/etc/openvas/gnupg"
+if [ -d "$GPG_DIR" ] && [ "$(ls -A $GPG_DIR)" ]; then
+    log_ok "GPG directory exists and is not empty"
+else
+    log_warn "GPG directory not properly configured"
+    log_and_print "SUGGEST: Run the setup script to configure GPG"
+fi
+
+# ============================================================================
+# Step 6: Check services
+# ============================================================================
+log_section "Step 6: Checking services..."
+
+check_service() {
+    local service=$1
+
+    if systemctl list-unit-files | grep -q "^${service}.service"; then
+        if systemctl is-active --quiet "$service" 2>/dev/null; then
+            log_ok "$service is running"
+            return 0
+        else
+            log_warn "$service is not running"
+            log_and_print "SUGGEST: Start with: systemctl start $service"
+            return 1
+        fi
+    else
+        log_warn "$service service file not found"
+        return 1
+    fi
+}
+
+# Check services (some may be optional)
+check_service "openvasd" || true
+check_service "ospd-openvas" || true
+check_service "gvmd" || true
+check_service "gsad" || true
+
+# ============================================================================
+# Step 7: Check feed data
+# ============================================================================
+log_section "Step 7: Checking feed data..."
+
+# Check NVT directory
+NVT_DIR="/var/lib/openvas/plugins"
+if [ -d "$NVT_DIR" ]; then
+    NVT_COUNT=$(find "$NVT_DIR" -name "*.nasl" 2>/dev/null | wc -l)
+    if [ "$NVT_COUNT" -gt 1000 ]; then
+        log_ok "NVT collection contains $NVT_COUNT scripts"
+    else
+        log_warn "NVT collection seems small ($NVT_COUNT scripts)"
+        log_and_print "SUGGEST: Run greenbone-feed-sync to update feeds"
+    fi
+else
+    log_error "NVT directory not found at $NVT_DIR"
+    log_and_print "FIX: Run greenbone-feed-sync to download feeds"
+fi
+
+# Check Notus advisories
+NOTUS_DIR="/var/lib/notus/advisories"
+if [ -d "$NOTUS_DIR" ]; then
+    log_ok "Notus advisories directory exists"
+else
+    log_warn "Notus advisories directory not found"
+    log_and_print "SUGGEST: Run greenbone-feed-sync to update Notus data"
+fi
+
+# ============================================================================
+# Step 8: Check users
+# ============================================================================
+log_section "Step 8: Checking users..."
+
+if command -v gvmd &> /dev/null; then
+    USER_COUNT=$(gvmd --get-users 2>/dev/null | wc -l)
+    if [ "$USER_COUNT" -gt 0 ]; then
+        log_ok "Found $USER_COUNT user(s) in gvmd"
+    else
+        log_error "No users found in gvmd"
+        log_and_print "FIX: Create a user with: gvmd --create-user=admin"
+        check_failed
+    fi
+fi
+
+# ============================================================================
+# Summary
+# ============================================================================
+echo ""
+echo "======================================"
+echo "Check Complete!"
+echo "======================================"
+echo ""
+
+if [ -s $LOG ]; then
+    echo "Log file saved to: $LOG"
+fi
+
+echo ""
+echo "Your Greenbone Community Edition installation appears to be correctly set up."
+echo ""
+echo "You can access the web interface at:"
+echo "  http://127.0.0.1:9392"
+echo ""
+echo "To manage services:"
+echo "  ./openvas-start  - Start all services"
+echo "  ./openvas-stop   - Stop all services"
+echo ""

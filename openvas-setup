@@ -1,41 +1,284 @@
 #!/bin/bash
-if ! grep -q "^unixsocket /var/lib/redis/redis.sock" /etc/redis/redis.conf ; then
-    sed -i -e 's/^\(#.\)\?port.*$/port 0/' /etc/redis/redis.conf
-    sed -i -e 's/^\(#.\)\?unixsocket \/.*$/unixsocket \/var\/lib\/redis\/redis.sock/' /etc/redis/redis.conf
-    sed -i -e 's/^\(#.\)\?unixsocketperm.*$/unixsocketperm 700/' /etc/redis/redis.conf
-fi
+# OpenVAS / Greenbone Community Edition Setup Script
+# Compatible with Greenbone Community Edition 22.4+
+#
+# This script performs initial setup for the modern GCE architecture:
+# - Configures Redis for openvas-scanner
+# - Sets up directory permissions
+# - Creates GPG keyring for feed validation
+# - Sets up PostgreSQL database
+# - Creates admin user
+# - Performs initial feed synchronization
+# - Starts and enables services
 
-test -e /var/lib/openvas/CA/cacert.pem || openvas-mkcert -q
-if (openssl verify -CAfile /var/lib/openvas/CA/cacert.pem \
-    /var/lib/openvas/CA/servercert.pem |grep -q ^error); then
-    openvas-mkcert -q -f
-fi
-openvas-nvt-sync
-openvas-scapdata-sync
-openvas-certdata-sync
-if ! test -e /var/lib/openvas/CA/clientcert.pem || \
-    ! test -e /var/lib/openvas/private/CA/clientkey.pem; then
-    openvas-mkcert-client -n -i
-fi
-if (openssl verify -CAfile /var/lib/openvas/CA/cacert.pem \
-    /var/lib/openvas/CA/clientcert.pem |grep -q ^error); then
-    openvas-mkcert-client -n -i
-fi
+set -e
 
-service openvas-manager stop 
-service openvas-scanner stop 
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-openvassd
-openvasmd --migrate
-openvasmd --progress --rebuild
+# Configuration
+GVM_USER="gvm"
+REDIS_CONF_SRC="/usr/share/openvas-scanner/redis-openvas.conf"
+REDIS_CONF_DST="/etc/redis/redis-openvas.conf"
+OPENVAS_CONF="/etc/openvas/openvas.conf"
 
-killall --wait openvassd
-sleep 5
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
 
-service openvas-scanner start
-service openvas-manager start
-service greenbone-security-assistant restart
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
 
-if ! openvasmd --get-users | grep -q ^admin$ ; then
-    openvasmd --create-user=admin
-fi
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        log_error "This script must be run as root"
+        exit 1
+    fi
+}
+
+create_gvm_user() {
+    log_info "Creating gvm user and group..."
+    if ! id "$GVM_USER" &>/dev/null; then
+        useradd -r -M -U -G sudo -s /usr/sbin/nologin "$GVM_USER"
+        log_info "Created gvm user"
+    else
+        log_info "gvm user already exists"
+    fi
+}
+
+setup_redis() {
+    log_info "Setting up Redis for OpenVAS..."
+
+    # Install redis-server if not present
+    if ! command -v redis-server &> /dev/null; then
+        log_info "Installing redis-server..."
+        apt-get update && apt-get install -y redis-server
+    fi
+
+    # Copy Redis configuration if available from openvas-scanner package
+    if [ -f "$REDIS_CONF_SRC" ]; then
+        cp "$REDIS_CONF_SRC" "$REDIS_CONF_DST"
+        chown redis:redis "$REDIS_CONF_DST"
+        log_info "Installed Redis configuration for OpenVAS"
+    else
+        log_warn "Redis config from openvas-scanner not found at $REDIS_CONF_SRC"
+        log_warn "Using local redis.conf template..."
+        # The local redis.conf will be used as fallback
+    fi
+
+    # Configure openvas to use the Redis socket
+    mkdir -p /etc/openvas
+    if ! grep -q "db_address" "$OPENVAS_CONF" 2>/dev/null; then
+        echo "db_address = /run/redis-openvas/redis.sock" >> "$OPENVAS_CONF"
+        log_info "Configured OpenVAS to use Redis socket"
+    fi
+
+    # Add gvm user to redis group
+    usermod -aG redis "$GVM_USER"
+
+    # Start and enable Redis
+    systemctl daemon-reload
+    if systemctl list-unit-files | grep -q "redis-server@openvas.service"; then
+        systemctl enable redis-server@openvas.service
+        systemctl start redis-server@openvas.service
+        log_info "Started redis-server@openvas.service"
+    else
+        systemctl enable redis-server
+        systemctl start redis-server
+        log_info "Started redis-server"
+    fi
+}
+
+setup_directories() {
+    log_info "Setting up directory permissions..."
+
+    # Create required directories
+    mkdir -p /var/lib/gvm
+    mkdir -p /var/lib/openvas
+    mkdir -p /var/lib/notus
+    mkdir -p /var/log/gvm
+    mkdir -p /run/gvmd
+    mkdir -p /run/ospd
+    mkdir -p /run/gsad
+    mkdir -p /run/redis-openvas
+    mkdir -p /etc/openvas/gnupg
+
+    # Set ownership
+    chown -R "$GVM_USER:$GVM_USER" /var/lib/gvm
+    chown -R "$GVM_USER:$GVM_USER" /var/lib/openvas
+    chown -R "$GVM_USER:$GVM_USER" /var/lib/notus
+    chown -R "$GVM_USER:$GVM_USER" /var/log/gvm
+    chown -R "$GVM_USER:$GVM_USER" /run/gvmd
+    chown -R "$GVM_USER:$GVM_USER" /run/ospd
+    chown -R "$GVM_USER:$GVM_USER" /run/gsad
+    chown -R "$GVM_USER:$GVM_USER" /etc/openvas/gnupg
+
+    # Set permissions
+    chmod -R g+srw /var/lib/gvm
+    chmod -R g+srw /var/lib/openvas
+    chmod -R g+srw /var/log/gvm
+    chmod 750 /etc/openvas/gnupg
+
+    log_info "Directory permissions configured"
+}
+
+setup_gpg() {
+    log_info "Setting up GPG for feed validation..."
+
+    # Download and import Greenbone signing key
+    if [ ! -f /tmp/GBCommunitySigningKey.asc ]; then
+        curl -f -L https://www.greenbone.net/GBCommunitySigningKey.asc -o /tmp/GBCommunitySigningKey.asc
+    fi
+
+    export GNUPGHOME=/tmp/openvas-gnupg
+    mkdir -p "$GNUPGHOME"
+
+    gpg --import /tmp/GBCommunitySigningKey.asc 2>/dev/null || true
+    echo "8AE4BE429B60A59B311C2E739823FAA60ED1E580:6:" | gpg --import-ownertrust 2>/dev/null || true
+
+    # Copy to system location
+    cp -r "$GNUPGHOME"/* /etc/openvas/gnupg/ 2>/dev/null || true
+    chown -R "$GVM_USER:$GVM_USER" /etc/openvas/gnupg
+
+    rm -rf "$GNUPGHOME"
+    log_info "GPG keyring configured"
+}
+
+setup_postgresql() {
+    log_info "Setting up PostgreSQL..."
+
+    # Install PostgreSQL if not present
+    if ! command -v psql &> /dev/null; then
+        log_info "Installing PostgreSQL..."
+        apt-get update && apt-get install -y postgresql
+    fi
+
+    # Start PostgreSQL
+    systemctl start postgresql
+
+    # Create database and user
+    sudo -u postgres bash << EOF
+createuser -DRS $GVM_USER 2>/dev/null || true
+createdb -O $GVM_USER gvmd 2>/dev/null || true
+psql gvmd -c "create role dba with superuser noinherit;" 2>/dev/null || true
+psql gvmd -c "grant dba to $GVM_USER;" 2>/dev/null || true
+EOF
+
+    log_info "PostgreSQL database configured"
+}
+
+setup_sudo() {
+    log_info "Setting up sudo for scanning..."
+
+    cat > /etc/sudoers.d/gvm << EOF
+# Allow gvm group to run openvas as root for scanning
+%gvm ALL = NOPASSWD: /usr/local/sbin/openvas
+%gvm ALL = NOPASSWD: /usr/sbin/openvas
+EOF
+    chmod 0440 /etc/sudoers.d/gvm
+    log_info "Sudo configuration added"
+}
+
+sync_feeds() {
+    log_info "Synchronizing feeds (this may take a while)..."
+
+    if command -v greenbone-feed-sync &> /dev/null; then
+        greenbone-feed-sync
+        log_info "Feed synchronization completed"
+    else
+        log_warn "greenbone-feed-sync not found. Please install it and run manually."
+    fi
+}
+
+create_admin_user() {
+    log_info "Creating admin user..."
+
+    # Wait for gvmd to be ready
+    sleep 5
+
+    if command -v gvmd &> /dev/null; then
+        # Create admin user with generated password
+        gvmd --create-user=admin 2>/dev/null || true
+
+        # Get the user UUID for feed import owner
+        ADMIN_UUID=$(gvmd --get-users --verbose 2>/dev/null | grep admin | awk '{print $2}')
+
+        if [ -n "$ADMIN_UUID" ]; then
+            # Set feed import owner
+            gvmd --modify-setting 78eceaec-3385-11ea-b237-28d24461215b --value "$ADMIN_UUID" 2>/dev/null || true
+            log_info "Admin user created and set as feed import owner"
+        fi
+    else
+        log_warn "gvmd not found. Please create admin user manually."
+    fi
+}
+
+enable_services() {
+    log_info "Enabling services..."
+
+    for service in openvasd ospd-openvas gvmd gsad; do
+        if systemctl list-unit-files | grep -q "^${service}.service"; then
+            systemctl enable "$service"
+            log_info "Enabled $service"
+        else
+            log_warn "Service $service not found"
+        fi
+    done
+}
+
+start_services() {
+    log_info "Starting services..."
+
+    # Start in dependency order
+    for service in openvasd ospd-openvas gvmd gsad; do
+        if systemctl list-unit-files | grep -q "^${service}.service"; then
+            systemctl start "$service" 2>/dev/null || log_warn "Failed to start $service"
+        fi
+    done
+}
+
+main() {
+    echo "======================================"
+    echo "Greenbone Community Edition Setup"
+    echo "======================================"
+    echo ""
+
+    check_root
+    create_gvm_user
+    setup_redis
+    setup_directories
+    setup_gpg
+    setup_postgresql
+    setup_sudo
+    sync_feeds
+    enable_services
+    start_services
+    create_admin_user
+
+    echo ""
+    echo "======================================"
+    echo "Setup Complete!"
+    echo "======================================"
+    echo ""
+    echo "The Greenbone Security Assistant web interface should be available at:"
+    echo "  http://127.0.0.1:9392"
+    echo ""
+    echo "Default admin user has been created. Check the output above for the password."
+    echo ""
+    echo "To manage services:"
+    echo "  ./openvas-start    - Start all services"
+    echo "  ./openvas-stop     - Stop all services"
+    echo "  ./openvas-feed-update - Update feeds"
+    echo ""
+    echo "Note: Initial feed loading may take several minutes. Check logs in /var/log/gvm/"
+}
+
+main "$@"

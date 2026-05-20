@@ -1,9 +1,92 @@
 #!/bin/bash
-echo "Updating OpenVas Feeds"
-openvas-nvt-sync
-openvas-scapdata-sync
-openvas-certdata-sync
+# OpenVAS / Greenbone Community Edition Feed Update Script
+# Compatible with Greenbone Community Edition 22.4+
+#
+# This script synchronizes all feed data from the Greenbone Community Feed:
+# - VT data (Vulnerability Tests)
+# - SCAP data (CPE/CVE information)
+# - CERT data (DFN-CERT and CERT-Bund advisories)
+# - GVMD data (Scan configs, port lists, report formats)
 
-echo "Updating Ports"
-wget -q http://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xml -O /tmp/ports.xml
-openvas-portnames-update /tmp/ports.xml
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+log_section() {
+    echo -e "${BLUE}[SECTION]${NC} $1"
+}
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+    log_error "This script should be run as root for best results"
+    log_info "Attempting to run with sudo..."
+    exec sudo "$0" "$@"
+fi
+
+echo "======================================"
+echo "Greenbone Community Feed Synchronization"
+echo "======================================"
+echo ""
+
+# Check for greenbone-feed-sync
+if ! command -v greenbone-feed-sync &> /dev/null; then
+    log_error "greenbone-feed-sync not found!"
+    echo ""
+    echo "Please install greenbone-feed-sync:"
+    echo "  pip install greenbone-feed-sync"
+    echo ""
+    echo "Or on Debian/Ubuntu:"
+    echo "  apt-get install python3-greenbone-feed-sync"
+    exit 1
+fi
+
+log_info "Starting feed synchronization..."
+log_warn "This may take a while, especially for the first sync."
+echo ""
+
+# Run the unified feed sync
+log_section "Downloading feed data..."
+greenbone-feed-sync "$@"
+
+if [ $? -eq 0 ]; then
+    echo ""
+    log_info "Feed download completed successfully!"
+else
+    echo ""
+    log_error "Feed download encountered errors."
+    exit 1
+fi
+
+echo ""
+echo "======================================"
+echo "Feed Synchronization Complete"
+echo "======================================"
+echo ""
+log_info "The downloaded data will be loaded automatically by the services."
+log_info "This may take several minutes. Check the logs for progress:"
+echo ""
+echo "  tail -f /var/log/gvm/ospd-openvas.log  # VT loading"
+echo "  tail -f /var/log/gvm/gvmd.log          # SCAP/CERT/GVMD data loading"
+echo ""
+echo "Look for these messages to confirm loading is complete:"
+echo "  ospd-openvas: 'Finished loading VTs. The VT cache has been updated...'"
+echo "  gvmd: 'Updating VTs in database ... done'"
+echo "  gvmd: 'update_scap_end: Updating SCAP info succeeded'"
+echo "  gvmd: 'sync_cert: Updating CERT info succeeded'"
